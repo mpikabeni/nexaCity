@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+asyncpg
+alembic
+pydantic
+pydantic-settings
+python-dotenv
+PyJWT
+cryptography
+httpx
+python-telegram-bot
+websockets
