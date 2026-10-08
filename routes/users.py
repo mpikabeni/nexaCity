@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.connection import get_db
 from models.user import User
+from services.auth_dependencies import get_current_user
 
 
 router = APIRouter(
@@ -20,11 +21,26 @@ router = APIRouter(
 # ============================================================
 
 class UserUpdate(BaseModel):
-    username: str | None = Field(default=None, max_length=100)
-    first_name: str | None = Field(default=None, max_length=100)
-    last_name: str | None = Field(default=None, max_length=100)
-    language: str | None = Field(default=None, max_length=20)
-    country: str | None = Field(default=None, max_length=100)
+    username: str | None = Field(
+        default=None,
+        max_length=100,
+    )
+    first_name: str | None = Field(
+        default=None,
+        max_length=100,
+    )
+    last_name: str | None = Field(
+        default=None,
+        max_length=100,
+    )
+    language: str | None = Field(
+        default=None,
+        max_length=20,
+    )
+    country: str | None = Field(
+        default=None,
+        max_length=100,
+    )
 
 
 class UserStatusUpdate(BaseModel):
@@ -32,27 +48,8 @@ class UserStatusUpdate(BaseModel):
 
 
 # ============================================================
-# HELPERS
+# SERIALIZER
 # ============================================================
-
-async def get_user_or_404(
-    user_id: int,
-    db: AsyncSession,
-) -> User:
-    result = await db.execute(
-        select(User).where(User.id == user_id)
-    )
-
-    user = result.scalar_one_or_none()
-
-    if not user:
-        raise HTTPException(
-            status_code=404,
-            detail="Utilisateur introuvable.",
-        )
-
-    return user
-
 
 def serialize_user(user: User) -> dict:
     return {
@@ -72,48 +69,56 @@ def serialize_user(user: User) -> dict:
 
 
 # ============================================================
-# GET USER
+# MY PROFILE
 # ============================================================
 
-@router.get("/{user_id}")
-async def get_user(
-    user_id: int,
-    db: AsyncSession = Depends(get_db),
+@router.get("/me")
+async def get_my_profile(
+    current_user: User = Depends(get_current_user),
 ):
-    user = await get_user_or_404(user_id, db)
+    """
+    Retourne le profil du joueur actuellement connecté.
+    """
 
     return {
         "status": "success",
-        "user": serialize_user(user),
+        "user": serialize_user(current_user),
     }
 
 
 # ============================================================
-# UPDATE USER
+# UPDATE MY PROFILE
 # ============================================================
 
-@router.patch("/{user_id}")
-async def update_user(
-    user_id: int,
+@router.patch("/me")
+async def update_my_profile(
     data: UserUpdate,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    user = await get_user_or_404(user_id, db)
+    """
+    Modifie uniquement le profil du joueur connecté.
+    """
 
     updates = data.model_dump(
         exclude_unset=True,
         exclude_none=True,
     )
 
-    # Vérification du username
+    # --------------------------------------------------------
+    # USERNAME
+    # --------------------------------------------------------
+
     if "username" in updates:
+
         username = updates["username"].strip()
 
         if username:
+
             result = await db.execute(
                 select(User).where(
                     User.username == username,
-                    User.id != user_id,
+                    User.id != current_user.id,
                 )
             )
 
@@ -125,100 +130,155 @@ async def update_user(
                     detail="Ce nom d'utilisateur est déjà utilisé.",
                 )
 
-            user.username = username
+            current_user.username = username
+
+    # --------------------------------------------------------
+    # PRENOM
+    # --------------------------------------------------------
 
     if "first_name" in updates:
-        user.first_name = updates["first_name"].strip()
+        current_user.first_name = (
+            updates["first_name"].strip()
+        )
+
+    # --------------------------------------------------------
+    # NOM
+    # --------------------------------------------------------
 
     if "last_name" in updates:
-        user.last_name = updates["last_name"].strip()
+        current_user.last_name = (
+            updates["last_name"].strip()
+        )
+
+    # --------------------------------------------------------
+    # LANGUE
+    # --------------------------------------------------------
 
     if "language" in updates:
-        user.language = updates["language"].strip()
+
+        language = updates["language"].strip()
+
+        if language:
+            current_user.language = language
+
+    # --------------------------------------------------------
+    # PAYS
+    # --------------------------------------------------------
 
     if "country" in updates:
-        user.country = updates["country"].strip()
 
-    user.updated_at = datetime.utcnow()
+        country = updates["country"].strip()
+
+        if country:
+            current_user.country = country
+
+    current_user.updated_at = datetime.utcnow()
 
     await db.commit()
-    await db.refresh(user)
+    await db.refresh(current_user)
 
     return {
         "status": "success",
-        "message": "Profil utilisateur mis à jour.",
-        "user": serialize_user(user),
+        "message": "Profil mis à jour.",
+        "user": serialize_user(current_user),
     }
 
 
 # ============================================================
-# UPDATE ONLINE STATUS
+# MY ONLINE STATUS
 # ============================================================
 
-@router.patch("/{user_id}/status")
-async def update_user_status(
-    user_id: int,
+@router.patch("/me/status")
+async def update_my_status(
     data: UserStatusUpdate,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    user = await get_user_or_404(user_id, db)
+    """
+    Met à jour le statut en ligne du joueur connecté.
+    """
 
-    user.online = data.online
-    user.updated_at = datetime.utcnow()
+    current_user.online = data.online
+    current_user.updated_at = datetime.utcnow()
 
     await db.commit()
-    await db.refresh(user)
 
     return {
         "status": "success",
-        "user_id": user.id,
-        "online": user.online,
-        "updated_at": user.updated_at,
+        "user_id": current_user.id,
+        "online": current_user.online,
+        "updated_at": current_user.updated_at,
     }
 
 
 # ============================================================
-# DEACTIVATE ACCOUNT
+# DEACTIVATE MY ACCOUNT
 # ============================================================
 
-@router.post("/{user_id}/deactivate")
-async def deactivate_account(
-    user_id: int,
+@router.post("/me/deactivate")
+async def deactivate_my_account(
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    user = await get_user_or_404(user_id, db)
+    """
+    Désactive le compte du joueur connecté.
+    """
 
-    user.active = False
-    user.online = False
-    user.updated_at = datetime.utcnow()
+    current_user.active = False
+    current_user.online = False
+    current_user.updated_at = datetime.utcnow()
 
     await db.commit()
 
     return {
         "status": "success",
         "message": "Compte désactivé.",
-        "user_id": user.id,
     }
 
 
 # ============================================================
-# REACTIVATE ACCOUNT
+# PUBLIC USER PROFILE
 # ============================================================
 
-@router.post("/{user_id}/activate")
-async def activate_account(
+@router.get("/{user_id}/public")
+async def get_public_profile(
     user_id: int,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    user = await get_user_or_404(user_id, db)
+    """
+    Retourne uniquement les informations publiques
+    d'un autre joueur.
 
-    user.active = True
-    user.updated_at = datetime.utcnow()
+    Cette route ne donne jamais :
+    - telegram_id
+    - données privées
+    - informations sensibles
+    """
 
-    await db.commit()
+    result = await db.execute(
+        select(User).where(
+            User.id == user_id,
+            User.active.is_(True),
+        )
+    )
+
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="Joueur introuvable.",
+        )
 
     return {
         "status": "success",
-        "message": "Compte activé.",
-        "user_id": user.id,
-    }
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "first_name": user.first_name,
+            "role": user.role,
+            "online": user.online,
+            "created_at": user.created_at,
+        },
+}
