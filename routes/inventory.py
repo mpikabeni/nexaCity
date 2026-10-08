@@ -1,9 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.connection import get_db
-from services.inventory_service import InventoryService
+from models.inventory import InventoryItem
+from models.user import User
+from services.auth_dependencies import get_current_user
 
 
 router = APIRouter(
@@ -12,137 +15,274 @@ router = APIRouter(
 )
 
 
-class ItemRequest(BaseModel):
-    user_id: int
-    item_id: str = Field(min_length=1, max_length=100)
-    item_type: str = Field(min_length=1, max_length=50)
-    quantity: int = Field(gt=0)
+# ============================================================
+# SCHEMAS
+# ============================================================
 
-
-@router.get("/{user_id}")
-async def get_inventory(
-    user_id: int,
-    db: AsyncSession = Depends(get_db),
-):
-    items = await InventoryService.get_inventory(
-        db,
-        user_id,
+class InventoryItemRequest(BaseModel):
+    item_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
     )
 
-    return {
-        "user_id": user_id,
-        "items": [
-            {
-                "id": item.id,
-                "item_id": item.item_id,
-                "item_type": item.item_type,
-                "quantity": item.quantity,
-                "created_at": item.created_at,
-                "updated_at": item.updated_at,
-            }
-            for item in items
-        ],
-    }
+    item_type: str = Field(
+        ...,
+        min_length=1,
+        max_length=50,
+    )
+
+    quantity: int = Field(
+        ...,
+        gt=0,
+    )
 
 
-@router.get("/{user_id}/{item_id}")
-async def get_item(
+class RemoveItemRequest(BaseModel):
+    item_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+    )
+
+    quantity: int = Field(
+        ...,
+        gt=0,
+    )
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+async def get_inventory_item(
     user_id: int,
     item_id: str,
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession,
 ):
-    item = await InventoryService.get_item(
-        db,
-        user_id,
-        item_id,
+    result = await db.execute(
+        select(InventoryItem).where(
+            InventoryItem.user_id == user_id,
+            InventoryItem.item_id == item_id,
+        )
     )
 
-    if item is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Item not found",
-        )
+    return result.scalar_one_or_none()
 
+
+def serialize_item(item: InventoryItem) -> dict:
     return {
         "id": item.id,
         "item_id": item.item_id,
         "item_type": item.item_type,
         "quantity": item.quantity,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
     }
 
 
-@router.post("/add")
-async def add_item(
-    data: ItemRequest,
+# ============================================================
+# MY INVENTORY
+# ============================================================
+
+@router.get("/me")
+async def get_my_inventory(
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    item = await InventoryService.add_item(
-        db=db,
-        user_id=data.user_id,
+    """
+    Retourne l'inventaire du joueur connecté.
+    """
+
+    result = await db.execute(
+        select(InventoryItem)
+        .where(
+            InventoryItem.user_id == current_user.id
+        )
+        .order_by(
+            InventoryItem.created_at.asc()
+        )
+    )
+
+    items = result.scalars().all()
+
+    return {
+        "status": "success",
+        "user_id": current_user.id,
+        "items": [
+            serialize_item(item)
+            for item in items
+        ],
+    }
+
+
+# ============================================================
+# GET ONE ITEM
+# ============================================================
+
+@router.get("/me/{item_id}")
+async def get_my_item(
+    item_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Retourne un objet précis de l'inventaire.
+    """
+
+    item = await get_inventory_item(
+        current_user.id,
+        item_id,
+        db,
+    )
+
+    if not item:
+        raise HTTPException(
+            status_code=404,
+            detail="Objet introuvable dans l'inventaire.",
+        )
+
+    return {
+        "status": "success",
+        "item": serialize_item(item),
+    }
+
+
+# ============================================================
+# HAS ITEM
+# ============================================================
+
+@router.get("/me/{item_id}/has")
+async def has_my_item(
+    item_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Vérifie si le joueur possède un objet.
+    """
+
+    item = await get_inventory_item(
+        current_user.id,
+        item_id,
+        db,
+    )
+
+    return {
+        "status": "success",
+        "item_id": item_id,
+        "has_item": item is not None and item.quantity > 0,
+        "quantity": item.quantity if item else 0,
+    }
+
+
+# ============================================================
+# ADD ITEM
+# ============================================================
+
+@router.post("/me/add")
+async def add_item(
+    data: InventoryItemRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Ajoute un objet à l'inventaire.
+
+    Dans la version finale, cette opération sera appelée
+    par les services serveur après une récompense, mission,
+    achat ou événement autorisé.
+    """
+
+    item = await get_inventory_item(
+        current_user.id,
+        data.item_id,
+        db,
+    )
+
+    if item:
+
+        item.quantity += data.quantity
+
+        await db.commit()
+        await db.refresh(item)
+
+        return {
+            "status": "success",
+            "message": "Objet ajouté.",
+            "item": serialize_item(item),
+        }
+
+    item = InventoryItem(
+        user_id=current_user.id,
         item_id=data.item_id,
         item_type=data.item_type,
         quantity=data.quantity,
     )
 
+    db.add(item)
+
+    await db.commit()
+    await db.refresh(item)
+
     return {
-        "status": "item_added",
-        "item": {
-            "id": item.id,
-            "item_id": item.item_id,
-            "item_type": item.item_type,
-            "quantity": item.quantity,
-        },
+        "status": "success",
+        "message": "Objet ajouté.",
+        "item": serialize_item(item),
     }
 
 
-@router.post("/remove")
+# ============================================================
+# REMOVE ITEM
+# ============================================================
+
+@router.post("/me/remove")
 async def remove_item(
-    data: ItemRequest,
+    data: RemoveItemRequest,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    success = await InventoryService.remove_item(
-        db=db,
-        user_id=data.user_id,
-        item_id=data.item_id,
-        quantity=data.quantity,
-    )
+    """
+    Retire une quantité d'un objet.
+    """
 
-    if not success:
-        raise HTTPException(
-            status_code=400,
-            detail="Unable to remove item or insufficient quantity",
-        )
-
-    return {
-        "status": "item_removed",
-        "item_id": data.item_id,
-        "quantity": data.quantity,
-    }
-
-
-@router.get("/has/{user_id}/{item_id}")
-async def has_item(
-    user_id: int,
-    item_id: str,
-    quantity: int = 1,
-    db: AsyncSession = Depends(get_db),
-):
-    if quantity <= 0:
-        raise HTTPException(
-            status_code=400,
-            detail="Quantity must be greater than zero",
-        )
-
-    has_item = await InventoryService.has_item(
+    item = await get_inventory_item(
+        current_user.id,
+        data.item_id,
         db,
-        user_id,
-        item_id,
-        quantity,
     )
 
+    if not item:
+        raise HTTPException(
+            status_code=404,
+            detail="Objet introuvable.",
+        )
+
+    if item.quantity < data.quantity:
+        raise HTTPException(
+            status_code=400,
+            detail="Quantité insuffisante.",
+        )
+
+    item.quantity -= data.quantity
+
+    if item.quantity <= 0:
+        await db.delete(item)
+
+        await db.commit()
+
+        return {
+            "status": "success",
+            "message": "Objet retiré de l'inventaire.",
+            "item_id": data.item_id,
+            "quantity": 0,
+        }
+
+    await db.commit()
+    await db.refresh(item)
+
     return {
-        "user_id": user_id,
-        "item_id": item_id,
-        "quantity_required": quantity,
-        "has_item": has_item,
-}
+        "status": "success",
+        "message": "Objet retiré.",
+        "item": serialize_item(item),
+    }
