@@ -1,5 +1,4 @@
 from datetime import datetime
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -7,8 +6,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.connection import get_db
-from models.user import User
 from models.character import Character
+from models.user import User
+from services.auth_dependencies import get_current_user
 
 
 router = APIRouter(
@@ -25,58 +25,153 @@ class CharacterCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=30)
     gender: str = Field(..., min_length=1, max_length=20)
 
-    skin_tone: str = Field(default="default", max_length=50)
-    hairstyle: str = Field(default="default", max_length=50)
-    eye_style: str = Field(default="default", max_length=50)
-    outfit: str = Field(default="default", max_length=50)
-    shoes: str = Field(default="default", max_length=50)
-    accessories: Optional[str] = Field(default=None, max_length=500)
+    skin_tone: str = Field(
+        default="default",
+        max_length=50,
+    )
+
+    hairstyle: str = Field(
+        default="default",
+        max_length=50,
+    )
+
+    eye_style: str = Field(
+        default="default",
+        max_length=50,
+    )
+
+    outfit: str = Field(
+        default="default",
+        max_length=50,
+    )
+
+    shoes: str = Field(
+        default="default",
+        max_length=50,
+    )
+
+    accessories: str | None = Field(
+        default=None,
+        max_length=500,
+    )
 
 
 class CharacterUpdate(BaseModel):
-    name: Optional[str] = Field(default=None, min_length=2, max_length=30)
-    gender: Optional[str] = Field(default=None, max_length=20)
-
-    skin_tone: Optional[str] = Field(default=None, max_length=50)
-    hairstyle: Optional[str] = Field(default=None, max_length=50)
-    eye_style: Optional[str] = Field(default=None, max_length=50)
-    outfit: Optional[str] = Field(default=None, max_length=50)
-    shoes: Optional[str] = Field(default=None, max_length=50)
-    accessories: Optional[str] = Field(default=None, max_length=500)
-
-    city: Optional[str] = Field(default=None, max_length=100)
-    district: Optional[str] = Field(default=None, max_length=100)
-
-
-# ============================================================
-# HELPERS
-# ============================================================
-
-async def get_user(
-    user_id: int,
-    db: AsyncSession,
-) -> User:
-    result = await db.execute(
-        select(User).where(User.id == user_id)
+    name: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=30,
     )
 
-    user = result.scalar_one_or_none()
+    gender: str | None = Field(
+        default=None,
+        max_length=20,
+    )
 
-    if not user:
-        raise HTTPException(
-            status_code=404,
-            detail="Utilisateur introuvable",
-        )
+    skin_tone: str | None = Field(
+        default=None,
+        max_length=50,
+    )
 
-    return user
+    hairstyle: str | None = Field(
+        default=None,
+        max_length=50,
+    )
+
+    eye_style: str | None = Field(
+        default=None,
+        max_length=50,
+    )
+
+    outfit: str | None = Field(
+        default=None,
+        max_length=50,
+    )
+
+    shoes: str | None = Field(
+        default=None,
+        max_length=50,
+    )
+
+    accessories: str | None = Field(
+        default=None,
+        max_length=500,
+    )
 
 
-async def get_character(
-    user_id: int,
-    db: AsyncSession,
-) -> Character:
+# ============================================================
+# SERIALIZER
+# ============================================================
+
+def serialize_character(
+    character: Character,
+) -> dict:
+
+    return {
+        "id": character.id,
+        "user_id": character.user_id,
+
+        "name": character.name,
+        "gender": character.gender,
+
+        "appearance": {
+            "skin_tone": character.skin_tone,
+            "hairstyle": character.hairstyle,
+            "eye_style": character.eye_style,
+            "outfit": character.outfit,
+            "shoes": character.shoes,
+            "accessories": character.accessories,
+        },
+
+        "progression": {
+            "level": character.level,
+            "experience": character.experience,
+            "reputation": character.reputation,
+        },
+
+        "economy": {
+            "money": character.money,
+        },
+
+        "needs": {
+            "energy": character.energy,
+            "hunger": character.hunger,
+            "hydration": character.hydration,
+            "health": character.health,
+        },
+
+        "life": {
+            "is_alive": character.is_alive,
+            "respawn_at": character.respawn_at,
+        },
+
+        "location": {
+            "city": character.city,
+            "district": character.district,
+        },
+
+        "created_at": character.created_at,
+        "updated_at": character.updated_at,
+    }
+
+
+# ============================================================
+# GET MY CHARACTER
+# ============================================================
+
+@router.get("/me")
+async def get_my_character(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Récupère le personnage du joueur connecté.
+    """
+
     result = await db.execute(
-        select(Character).where(Character.user_id == user_id)
+        select(Character).where(
+            Character.user_id == current_user.id
+        )
     )
 
     character = result.scalar_one_or_none()
@@ -84,44 +179,47 @@ async def get_character(
     if not character:
         raise HTTPException(
             status_code=404,
-            detail="Personnage introuvable",
+            detail="Aucun personnage créé.",
         )
 
-    return character
+    return {
+        "status": "success",
+        "character": serialize_character(character),
+    }
 
 
 # ============================================================
-# CREATE CHARACTER
+# CREATE MY CHARACTER
 # ============================================================
 
-@router.post("/{user_id}")
-async def create_character(
-    user_id: int,
+@router.post("/me")
+async def create_my_character(
     data: CharacterCreate,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Crée le personnage principal d'un joueur.
+    Crée le personnage principal du joueur connecté.
 
-    Un utilisateur ne peut posséder qu'un seul personnage principal.
+    Un joueur ne peut avoir qu'un seul personnage.
     """
 
-    await get_user(user_id, db)
-
-    existing_result = await db.execute(
-        select(Character).where(Character.user_id == user_id)
+    result = await db.execute(
+        select(Character).where(
+            Character.user_id == current_user.id
+        )
     )
 
-    existing_character = existing_result.scalar_one_or_none()
+    existing_character = result.scalar_one_or_none()
 
     if existing_character:
         raise HTTPException(
             status_code=409,
-            detail="Ce joueur possède déjà un personnage.",
+            detail="Vous possédez déjà un personnage.",
         )
 
     character = Character(
-        user_id=user_id,
+        user_id=current_user.id,
 
         name=data.name,
         gender=data.gender,
@@ -161,126 +259,37 @@ async def create_character(
     return {
         "status": "success",
         "message": "Personnage créé avec succès.",
-        "character": {
-            "id": character.id,
-            "user_id": character.user_id,
-            "name": character.name,
-            "gender": character.gender,
-
-            "appearance": {
-                "skin_tone": character.skin_tone,
-                "hairstyle": character.hairstyle,
-                "eye_style": character.eye_style,
-                "outfit": character.outfit,
-                "shoes": character.shoes,
-                "accessories": character.accessories,
-            },
-
-            "level": character.level,
-            "experience": character.experience,
-            "reputation": character.reputation,
-            "money": character.money,
-
-            "needs": {
-                "energy": character.energy,
-                "hunger": character.hunger,
-                "hydration": character.hydration,
-                "health": character.health,
-            },
-
-            "is_alive": character.is_alive,
-            "respawn_at": character.respawn_at,
-
-            "city": character.city,
-            "district": character.district,
-
-            "created_at": character.created_at,
-            "updated_at": character.updated_at,
-        },
+        "character": serialize_character(character),
     }
 
 
 # ============================================================
-# GET CHARACTER
+# UPDATE MY CHARACTER
 # ============================================================
 
-@router.get("/{user_id}")
-async def get_character_profile(
-    user_id: int,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Retourne le personnage complet d'un joueur.
-    """
-
-    character = await get_character(user_id, db)
-
-    return {
-        "status": "success",
-        "character": {
-            "id": character.id,
-            "user_id": character.user_id,
-
-            "name": character.name,
-            "gender": character.gender,
-
-            "appearance": {
-                "skin_tone": character.skin_tone,
-                "hairstyle": character.hairstyle,
-                "eye_style": character.eye_style,
-                "outfit": character.outfit,
-                "shoes": character.shoes,
-                "accessories": character.accessories,
-            },
-
-            "progression": {
-                "level": character.level,
-                "experience": character.experience,
-                "reputation": character.reputation,
-            },
-
-            "economy": {
-                "money": character.money,
-            },
-
-            "needs": {
-                "energy": character.energy,
-                "hunger": character.hunger,
-                "hydration": character.hydration,
-                "health": character.health,
-            },
-
-            "life": {
-                "is_alive": character.is_alive,
-                "respawn_at": character.respawn_at,
-            },
-
-            "location": {
-                "city": character.city,
-                "district": character.district,
-            },
-
-            "created_at": character.created_at,
-            "updated_at": character.updated_at,
-        },
-    }
-
-
-# ============================================================
-# UPDATE CHARACTER
-# ============================================================
-
-@router.patch("/{user_id}")
-async def update_character(
-    user_id: int,
+@router.patch("/me")
+async def update_my_character(
     data: CharacterUpdate,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Met à jour les informations personnalisables du personnage.
+    Modifie les éléments personnalisables du personnage.
     """
 
-    character = await get_character(user_id, db)
+    result = await db.execute(
+        select(Character).where(
+            Character.user_id == current_user.id
+        )
+    )
+
+    character = result.scalar_one_or_none()
+
+    if not character:
+        raise HTTPException(
+            status_code=404,
+            detail="Aucun personnage créé.",
+        )
 
     updates = data.model_dump(
         exclude_unset=True,
@@ -289,13 +298,12 @@ async def update_character(
 
     for field, value in updates.items():
 
-        # La position sera gérée par le système de localisation.
-        if field in {"city", "district"}:
-            setattr(character, field, value)
-            continue
-
         if hasattr(character, field):
-            setattr(character, field, value)
+            setattr(
+                character,
+                field,
+                value,
+            )
 
     character.updated_at = datetime.utcnow()
 
@@ -305,39 +313,7 @@ async def update_character(
     return {
         "status": "success",
         "message": "Personnage mis à jour.",
-        "character": {
-            "id": character.id,
-            "user_id": character.user_id,
-            "name": character.name,
-            "gender": character.gender,
-
-            "appearance": {
-                "skin_tone": character.skin_tone,
-                "hairstyle": character.hairstyle,
-                "eye_style": character.eye_style,
-                "outfit": character.outfit,
-                "shoes": character.shoes,
-                "accessories": character.accessories,
-            },
-
-            "level": character.level,
-            "experience": character.experience,
-            "reputation": character.reputation,
-            "money": character.money,
-
-            "energy": character.energy,
-            "hunger": character.hunger,
-            "hydration": character.hydration,
-            "health": character.health,
-
-            "is_alive": character.is_alive,
-            "respawn_at": character.respawn_at,
-
-            "city": character.city,
-            "district": character.district,
-
-            "updated_at": character.updated_at,
-        },
+        "character": serialize_character(character),
     }
 
 
@@ -345,17 +321,28 @@ async def update_character(
 # CHARACTER STATUS
 # ============================================================
 
-@router.get("/{user_id}/status")
-async def character_status(
-    user_id: int,
+@router.get("/me/status")
+async def get_my_character_status(
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Retourne uniquement l'état important du personnage
-    pour le jeu en temps réel.
+    Retourne les données nécessaires au jeu en temps réel.
     """
 
-    character = await get_character(user_id, db)
+    result = await db.execute(
+        select(Character).where(
+            Character.user_id == current_user.id
+        )
+    )
+
+    character = result.scalar_one_or_none()
+
+    if not character:
+        raise HTTPException(
+            status_code=404,
+            detail="Aucun personnage créé.",
+        )
 
     return {
         "status": "success",
@@ -368,6 +355,136 @@ async def character_status(
         "reputation": character.reputation,
 
         "money": character.money,
+
+        "energy": character.energy,
+        "hunger": character.hunger,
+        "hydration": character.hydration,
+        "health": character.health,
+
+        "is_alive": character.is_alive,
+        "respawn_at": character.respawn_at,
+
+        "city": character.city,
+        "district": character.district,
+
+        "updated_at": character.updated_at,
+    }
+
+
+# ============================================================
+# SYNC CHARACTER
+# ============================================================
+
+@router.post("/me/sync")
+async def sync_my_character(
+    data: CharacterUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Synchronisation du personnage.
+
+    Le frontend pourra appeler cette route :
+    - après une action importante ;
+    - lors d'une sauvegarde périodique ;
+    - avant la fermeture de la session.
+    """
+
+    result = await db.execute(
+        select(Character).where(
+            Character.user_id == current_user.id
+        )
+    )
+
+    character = result.scalar_one_or_none()
+
+    if not character:
+        raise HTTPException(
+            status_code=404,
+            detail="Aucun personnage créé.",
+        )
+
+    updates = data.model_dump(
+        exclude_unset=True,
+        exclude_none=True,
+    )
+
+    for field, value in updates.items():
+
+        if hasattr(character, field):
+            setattr(
+                character,
+                field,
+                value,
+            )
+
+    character.updated_at = datetime.utcnow()
+
+    await db.commit()
+    await db.refresh(character)
+
+    return {
+        "status": "success",
+        "message": "Personnage synchronisé.",
+        "character_id": character.id,
+        "updated_at": character.updated_at,
+    }
+
+
+# ============================================================
+# PUBLIC CHARACTER
+# ============================================================
+
+@router.get("/{character_id}/public")
+async def get_public_character(
+    character_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Profil public d'un autre joueur.
+    """
+
+    result = await db.execute(
+        select(Character).where(
+            Character.id == character_id
+        )
+    )
+
+    character = result.scalar_one_or_none()
+
+    if not character:
+        raise HTTPException(
+            status_code=404,
+            detail="Personnage introuvable.",
+        )
+
+    return {
+        "status": "success",
+        "character": {
+            "id": character.id,
+            "name": character.name,
+
+            "gender": character.gender,
+
+            "appearance": {
+                "skin_tone": character.skin_tone,
+                "hairstyle": character.hairstyle,
+                "eye_style": character.eye_style,
+                "outfit": character.outfit,
+                "shoes": character.shoes,
+                "accessories": character.accessories,
+            },
+
+            "level": character.level,
+            "reputation": character.reputation,
+
+            "is_alive": character.is_alive,
+
+            "city": character.city,
+            "district": character.district,
+        },
+    }money,
 
         "energy": character.energy,
         "hunger": character.hunger,
