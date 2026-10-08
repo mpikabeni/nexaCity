@@ -1,6 +1,4 @@
-from datetime import datetime
-
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,9 +22,12 @@ class UpdateUserRequest(BaseModel):
 
     country: str | None = Field(
         default=None,
-        min_length=2,
         max_length=100,
     )
+
+
+class OnlineStatusRequest(BaseModel):
+    online: bool
 
 
 @router.get("/{user_id}")
@@ -35,14 +36,16 @@ async def get_user(
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(User).where(User.id == user_id)
+        select(User).where(
+            User.id == user_id
+        )
     )
 
     user = result.scalar_one_or_none()
 
     if user is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=404,
             detail="User not found",
         )
 
@@ -55,9 +58,9 @@ async def get_user(
         "language": user.language,
         "country": user.country,
         "role": user.role,
-        "is_online": user.is_online,
+        "active": user.active,
+        "online": user.online,
         "created_at": user.created_at,
-        "last_seen": user.last_seen,
     }
 
 
@@ -68,14 +71,16 @@ async def update_user(
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(User).where(User.id == user_id)
+        select(User).where(
+            User.id == user_id
+        )
     )
 
     user = result.scalar_one_or_none()
 
     if user is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=404,
             detail="User not found",
         )
 
@@ -85,13 +90,11 @@ async def update_user(
     if data.country is not None:
         user.country = data.country
 
-    user.last_seen = datetime.utcnow()
-
     await db.commit()
     await db.refresh(user)
 
     return {
-        "status": "updated",
+        "status": "user_updated",
         "user": {
             "id": user.id,
             "language": user.language,
@@ -100,55 +103,32 @@ async def update_user(
     }
 
 
-@router.post("/{user_id}/online")
-async def set_online(
+@router.post("/{user_id}/status")
+async def update_online_status(
     user_id: int,
+    data: OnlineStatusRequest,
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(User).where(User.id == user_id)
+        select(User).where(
+            User.id == user_id
+        )
     )
 
     user = result.scalar_one_or_none()
 
     if user is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=404,
             detail="User not found",
         )
 
-    user.is_online = True
-    user.last_seen = datetime.utcnow()
+    user.online = data.online
 
     await db.commit()
 
     return {
-        "status": "online",
-    }
-
-
-@router.post("/{user_id}/offline")
-async def set_offline(
-    user_id: int,
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(
-        select(User).where(User.id == user_id)
-    )
-
-    user = result.scalar_one_or_none()
-
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found",
-        )
-
-    user.is_online = False
-    user.last_seen = datetime.utcnow()
-
-    await db.commit()
-
-    return {
-        "status": "offline",
+        "status": "online_status_updated",
+        "user_id": user.id,
+        "online": user.online,
 }
