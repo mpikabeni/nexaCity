@@ -1,8 +1,12 @@
-from datetime import datetime, timedelta
+import hashlib
+import hmac
+import json
+import time
+from urllib.parse import parse_qsl
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,22 +22,111 @@ router = APIRouter(
 
 
 class TelegramAuthRequest(BaseModel):
-    telegram_id: int
-    username: str | None = None
-    first_name: str | None = None
-    last_name: str | None = None
-    language: str | None = None
+    init_data: str = Field(min_length=1)
+
+
+def verify_telegram_init_data(init_data: str) -> dict:
+    """
+    Vérifie cryptographiquement Telegram Web App initData.
+    """
+
+    try:
+        parsed = dict(parse_qsl(init_data, keep_blank_values=True))
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid Telegram initData",
+        )
+
+    received_hash = parsed.pop("hash", None)
+
+    if not received_hash:
+        raise HTTPException(
+            status_code=400,
+            detail="Telegram hash missing",
+        )
+
+    auth_date = parsed.get("auth_date")
+
+    if not auth_date:
+        raise HTTPException(
+            status_code=400,
+            detail="Telegram auth_date missing",
+        )
+
+    try:
+        auth_timestamp = int(auth_date)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid Telegram auth_date",
+        )
+
+    # Évite la réutilisation d'une ancienne initData.
+    current_time = int(time.time())
+
+    if current_time - auth_timestamp > 86400:
+        raise HTTPException(
+            status_code=401,
+            detail="Telegram authentication data expired",
+        )
+
+    data_check_string = "\n".join(
+        f"{key}={value}"
+        for key, value in sorted(parsed.items())
+    )
+
+    secret_key = hmac.new(
+        b"WebAppData",
+        settings.telegram_bot_token.encode(),
+        hashlib.sha256,
+    ).digest()
+
+    calculated_hash = hmac.new(
+        secret_key,
+        data_check_string.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(
+        calculated_hash,
+        received_hash,
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid Telegram authentication",
+        )
+
+    user_data_raw = parsed.get("user")
+
+    if not user_data_raw:
+        raise HTTPException(
+            status_code=400,
+            detail="Telegram user data missing",
+        )
+
+    try:
+        telegram_user = json.loads(user_data_raw)
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid Telegram user data",
+        )
+
+    if not telegram_user.get("id"):
+        raise HTTPException(
+            status_code=400,
+            detail="Telegram user ID missing",
+        )
+
+    return telegram_user
 
 
 def create_access_token(user_id: int) -> str:
-    expires_at = datetime.utcnow() + timedelta(
-        minutes=settings.access_token_expire_minutes
-    )
-
     payload = {
         "sub": str(user_id),
         "type": "access",
-        "exp": expires_at,
+        "iat": int(time.time()),
     }
 
     return jwt.encode(
@@ -44,19 +137,37 @@ def create_access_token(user_id: int) -> str:
 
 
 @router.post("/telegram")
-async def authenticate_telegram(
+async def telegram_login(
     data: TelegramAuthRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    if data.telegram_id <= 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid Telegram ID",
-        )
+    telegram_user = verify_telegram_init_data(
+        data.init_data
+    )
+
+    telegram_id = int(
+        telegram_user["id"]
+    )
+
+    username = telegram_user.get(
+        "username"
+    )
+
+    first_name = telegram_user.get(
+        "first_name"
+    )
+
+    last_name = telegram_user.get(
+        "last_name"
+    )
+
+    language = telegram_user.get(
+        "language_code"
+    )
 
     result = await db.execute(
         select(User).where(
-            User.telegram_id == data.telegram_id
+            User.telegram_id == telegram_id
         )
     )
 
@@ -66,15 +177,13 @@ async def authenticate_telegram(
 
     if user is None:
         user = User(
-            telegram_id=data.telegram_id,
-            username=data.username,
-            first_name=data.first_name,
-            last_name=data.last_name,
-            language=data.language or "en",
-            role="PLAYER",
-            is_active=True,
-            is_online=True,
-            last_seen=datetime.utcnow(),
+            telegram_id=telegram_id,
+            username=username,
+            first_name=first_name,
+            last_name=last_name,
+            language=language,
+            active=True,
+            online=True,
         )
 
         db.add(user)
@@ -85,31 +194,27 @@ async def authenticate_telegram(
         is_new_player = True
 
     else:
-        user.username = data.username
-        user.first_name = data.first_name
-        user.last_name = data.last_name
+        user.username = username
+        user.first_name = first_name
+        user.last_name = last_name
 
-        if data.language:
-            user.language = data.language
+        if language:
+            user.language = language
 
-        user.is_active = True
-        user.is_online = True
-        user.last_seen = datetime.utcnow()
+        user.active = True
+        user.online = True
 
         await db.commit()
         await db.refresh(user)
 
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account disabled",
-        )
-
-    token = create_access_token(user.id)
+    access_token = create_access_token(
+        user.id
+    )
 
     return {
-        "access_token": token,
-        "token_type": "bearer",
+        "status": "authenticated",
+        "is_new_player": is_new_player,
+        "access_token": access_token,
         "user": {
             "id": user.id,
             "telegram_id": user.telegram_id,
@@ -119,11 +224,10 @@ async def authenticate_telegram(
             "language": user.language,
             "role": user.role,
         },
-        "is_new_player": is_new_player,
     }
 
 
-@router.post("/logout")
+@router.post("/logout/{user_id}")
 async def logout(
     user_id: int,
     db: AsyncSession = Depends(get_db),
@@ -138,15 +242,15 @@ async def logout(
 
     if user is None:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=404,
             detail="User not found",
         )
 
-    user.is_online = False
-    user.last_seen = datetime.utcnow()
+    user.online = False
 
     await db.commit()
 
     return {
         "status": "logged_out",
-}
+        "user_id": user_id,
+    }
